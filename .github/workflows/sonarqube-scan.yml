@@ -1,0 +1,40 @@
+name: SonarQube Scan (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      project-key:
+        description: SonarQube project key
+        type: string
+        required: true
+      sonarqube-host:
+        description: SonarQube host URL
+        type: string
+        required: false
+        default: ''
+    secrets:
+      SONARQUBE_TOKEN:
+        description: SonarQube authentication token
+        required: true
+      SONARQUBE_HOST_URL:
+        description: SonarQube host URL (if not provided as input)
+        required: false
+
+jobs:
+  sonarqube:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@v3
+        env:
+          SONAR_TOKEN: ${{ secrets.SONARQUBE_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonarqube-host || secrets.SONARQUBE_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ inputs.project-key }}
+            -Dsonar.qualitygate.wait=true

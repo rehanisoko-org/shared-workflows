@@ -1,0 +1,121 @@
+name: Docker Build & Push to ECR (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ecr-repository:
+        description: ECR repository name (without registry prefix)
+        type: string
+        required: true
+      image-tag:
+        description: Docker image tag (defaults to commit SHA)
+        type: string
+        required: false
+        default: ''
+      dockerfile:
+        description: Path to Dockerfile
+        type: string
+        required: false
+        default: Dockerfile
+      context:
+        description: Docker build context
+        type: string
+        required: false
+        default: .
+      build-args:
+        description: Docker build args (newline-separated KEY=VALUE)
+        type: string
+        required: false
+        default: ''
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+      aws-account-id:
+        description: AWS account ID
+        type: string
+        required: false
+        default: '561513845508'
+      cache-from-latest:
+        description: Pull latest image as cache layer before build
+        type: boolean
+        required: false
+        default: true
+    outputs:
+      image-uri:
+        description: Full image URI pushed to ECR
+        value: ${{ jobs.build.outputs.image-uri }}
+      image-tag:
+        description: The tag used for the pushed image
+        value: ${{ jobs.build.outputs.image-tag }}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    outputs:
+      image-uri: ${{ steps.meta.outputs.image-uri }}
+      image-tag: ${{ steps.meta.outputs.image-tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          TAG="${{ inputs.image-tag }}"
+          if [ -z "$TAG" ]; then TAG="${GITHUB_SHA::8}"; fi
+          REGISTRY="${{ inputs.aws-account-id }}.dkr.ecr.${{ inputs.aws-region }}.amazonaws.com"
+          IMAGE_URI="$REGISTRY/${{ inputs.ecr-repository }}:$TAG"
+          echo "image-tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image-uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+          echo "REGISTRY=$REGISTRY" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registries: ${{ inputs.aws-account-id }}
+
+      - name: Pull latest for cache
+        if: inputs.cache-from-latest
+        run: |
+          docker pull "$REGISTRY/${{ inputs.ecr-repository }}:latest" 2>/dev/null || true
+        env:
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+
+      - name: Build Docker image
+        run: |
+          BUILD_ARGS=""
+          if [ -n "${{ inputs.build-args }}" ]; then
+            while IFS= read -r arg; do
+              [ -n "$arg" ] && BUILD_ARGS="$BUILD_ARGS --build-arg $arg"
+            done <<< "${{ inputs.build-args }}"
+          fi
+          docker build $BUILD_ARGS \
+            --cache-from "$REGISTRY/${{ inputs.ecr-repository }}:latest" \
+            -t "$IMAGE_URI" \
+            -t "$REGISTRY/${{ inputs.ecr-repository }}:latest" \
+            -f "${{ inputs.dockerfile }}" \
+            "${{ inputs.context }}"
+        env:
+          REGISTRY: ${{ steps.meta.outputs.registry }}
+
+      - name: Push to ECR
+        run: |
+          docker push "$IMAGE_URI"
+          docker push "$REGISTRY/${{ inputs.ecr-repository }}:latest"
+        env:
+          REGISTRY: ${{ steps.meta.outputs.registry }}

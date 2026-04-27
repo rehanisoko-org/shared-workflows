@@ -1,0 +1,90 @@
+name: Scraper EC2 Run (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      scraper-name:
+        description: Name of the scraper to run
+        type: string
+        required: true
+      instance-tag:
+        description: EC2 instance tag value to target
+        type: string
+        required: true
+      sns-topic-arn:
+        description: SNS topic ARN for instance orchestration
+        type: string
+        required: true
+      executor-type:
+        description: 'Executor type: gui or non-gui'
+        type: string
+        required: false
+        default: non-gui
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  run-scraper:
+    name: Run ${{ inputs.scraper-name }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Check if instance is already running
+        id: check
+        env:
+          INSTANCE_TAG: ${{ inputs.instance-tag }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          COUNT=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=$INSTANCE_TAG" \
+                      "Name=instance-state-name,Values=running,pending" \
+            --region "$AWS_REGION" | \
+            jq '.Reservations | length')
+          echo "running-count=$COUNT" >> "$GITHUB_OUTPUT"
+          echo "Instance count for $INSTANCE_TAG: $COUNT"
+
+      - name: Launch scraper via SNS
+        if: steps.check.outputs.running-count == '0'
+        env:
+          SNS_TOPIC: ${{ inputs.sns-topic-arn }}
+          SCRAPER_NAME: ${{ inputs.scraper-name }}
+          EXECUTOR_TYPE: ${{ inputs.executor-type }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          MESSAGE="{\"scraper\":\"$SCRAPER_NAME\",\"executor\":\"$EXECUTOR_TYPE\",\"source\":\"github-actions\"}"
+          aws sns publish \
+            --topic-arn "$SNS_TOPIC" \
+            --message "$MESSAGE" \
+            --region "$AWS_REGION"
+          echo "SNS message published for $SCRAPER_NAME"
+
+      - name: Skip (instance already running)
+        if: steps.check.outputs.running-count != '0'
+        run: echo "Instance already running for ${{ inputs.instance-tag }} — skipping launch."
+
+      - name: Notify Slack
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SCRAPER: ${{ inputs.scraper-name }}
+          STATUS: ${{ job.status }}
+        run: |
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"Scraper *$SCRAPER* job: $STATUS\"}"

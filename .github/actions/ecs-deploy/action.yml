@@ -1,0 +1,87 @@
+name: ECS Task Definition Deploy
+description: Update ECS task definition with new image and force new deployment
+
+inputs:
+  task-family:
+    description: ECS task definition family name
+    required: true
+  cluster:
+    description: ECS cluster name
+    required: true
+  service:
+    description: ECS service name
+    required: true
+  container-name:
+    description: Container name in the task definition to update
+    required: true
+  image-uri:
+    description: Full ECR image URI (registry/repo:tag)
+    required: true
+  aws-region:
+    description: AWS region
+    required: false
+    default: us-east-2
+
+runs:
+  using: composite
+  steps:
+    - name: Update task definition and deploy
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        TASK_FAMILY: ${{ inputs.task-family }}
+        ECS_CLUSTER: ${{ inputs.cluster }}
+        ECS_SERVICE: ${{ inputs.service }}
+        CONTAINER_NAME: ${{ inputs.container-name }}
+        IMAGE_URI: ${{ inputs.image-uri }}
+      run: |
+        echo "Fetching current task definition: $TASK_FAMILY"
+        CURRENT_TASK_DEFINITION=$(aws ecs describe-task-definition \
+          --task-definition "$TASK_FAMILY" --region "$AWS_REGION")
+
+        echo "Updating container image..."
+        NEW_TASK_DEF=$(echo "$CURRENT_TASK_DEFINITION" | jq --arg IMAGE "$IMAGE_URI" --arg CNAME "$CONTAINER_NAME" '
+          .taskDefinition |
+          .containerDefinitions |= map(if .name == $CNAME then .image = $IMAGE else . end) |
+          del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+              .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
+        ')
+
+        echo "Registering new task definition..."
+        NEW_REVISION=$(aws ecs register-task-definition \
+          --cli-input-json "$NEW_TASK_DEF" --region "$AWS_REGION" | \
+          jq -r '.taskDefinition.revision')
+        echo "New revision: $TASK_FAMILY:$NEW_REVISION"
+
+        echo "Updating ECS service..."
+        aws ecs update-service \
+          --cluster "$ECS_CLUSTER" \
+          --service "$ECS_SERVICE" \
+          --task-definition "$TASK_FAMILY:$NEW_REVISION" \
+          --force-new-deployment \
+          --region "$AWS_REGION" > /dev/null
+
+        echo "Waiting for service to stabilize..."
+        aws ecs wait services-stable \
+          --cluster "$ECS_CLUSTER" \
+          --services "$ECS_SERVICE" \
+          --region "$AWS_REGION"
+        echo "Service stable."
+
+    - name: Cleanup old task definition revisions
+      shell: bash
+      env:
+        AWS_REGION: ${{ inputs.aws-region }}
+        TASK_FAMILY: ${{ inputs.task-family }}
+      run: |
+        CURRENT=$(aws ecs describe-task-definition \
+          --task-definition "$TASK_FAMILY" --region "$AWS_REGION" | \
+          jq -r '.taskDefinition.revision')
+        PREVIOUS=$(aws ecs list-task-definitions \
+          --family-prefix "$TASK_FAMILY" --region "$AWS_REGION" | \
+          jq -r '.taskDefinitionArns[]' | grep -v ":${CURRENT}$" | tail -5)
+        for rev in $PREVIOUS; do
+          echo "Deregistering $rev"
+          aws ecs deregister-task-definition \
+            --task-definition "$rev" --region "$AWS_REGION" > /dev/null
+        done

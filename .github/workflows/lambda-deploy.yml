@@ -1,0 +1,88 @@
+name: Lambda Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image-uri:
+        description: ECR image URI to deploy to Lambda
+        type: string
+        required: true
+      function-names:
+        description: Comma-separated Lambda function names to update
+        type: string
+        required: true
+      env-file-path:
+        description: Path to .env file for syncing environment variables (optional)
+        type: string
+        required: false
+        default: ''
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to Lambda
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Update Lambda function images
+        env:
+          IMAGE_URI: ${{ inputs.image-uri }}
+          FUNCTION_NAMES: ${{ inputs.function-names }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          IFS=',' read -ra FUNCTIONS <<< "$FUNCTION_NAMES"
+          for fn in "${FUNCTIONS[@]}"; do
+            fn=$(echo "$fn" | xargs)
+            echo "Updating function: $fn -> $IMAGE_URI"
+            aws lambda update-function-code \
+              --function-name "$fn" \
+              --image-uri "$IMAGE_URI" \
+              --region "$AWS_REGION" > /dev/null
+            echo "Waiting for $fn to be active..."
+            aws lambda wait function-updated \
+              --function-name "$fn" \
+              --region "$AWS_REGION"
+            echo "$fn updated."
+          done
+
+      - name: Sync environment variables from .env file
+        if: inputs.env-file-path != ''
+        env:
+          ENV_FILE: ${{ inputs.env-file-path }}
+          FUNCTION_NAMES: ${{ inputs.function-names }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "::warning::env file not found: $ENV_FILE — skipping env sync"
+            exit 0
+          fi
+          ENV_VARS=$(grep -v '^#' "$ENV_FILE" | grep '=' | \
+            jq -Rn '[inputs | split("=") | {(.[0]): (.[1:]|join("="))}] | add // {}')
+          IFS=',' read -ra FUNCTIONS <<< "$FUNCTION_NAMES"
+          for fn in "${FUNCTIONS[@]}"; do
+            fn=$(echo "$fn" | xargs)
+            echo "Syncing env vars to $fn"
+            aws lambda update-function-configuration \
+              --function-name "$fn" \
+              --environment "{\"Variables\": $ENV_VARS}" \
+              --region "$AWS_REGION" > /dev/null
+            aws lambda wait function-updated \
+              --function-name "$fn" \
+              --region "$AWS_REGION"
+          done

@@ -1,0 +1,106 @@
+name: ECS Service Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      image-uri:
+        description: Full ECR image URI to deploy
+        type: string
+        required: true
+      task-family:
+        description: ECS task definition family name
+        type: string
+        required: true
+      cluster:
+        description: ECS cluster name
+        type: string
+        required: true
+      service:
+        description: ECS service name
+        type: string
+        required: true
+      container-name:
+        description: Container name in task definition to update
+        type: string
+        required: true
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ECS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Update task definition and deploy
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+          TASK_FAMILY: ${{ inputs.task-family }}
+          ECS_CLUSTER: ${{ inputs.cluster }}
+          ECS_SERVICE: ${{ inputs.service }}
+          CONTAINER_NAME: ${{ inputs.container-name }}
+          IMAGE_URI: ${{ inputs.image-uri }}
+        run: |
+          echo "Fetching current task definition: $TASK_FAMILY"
+          CURRENT_TD=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" --region "$AWS_REGION")
+
+          NEW_TD=$(echo "$CURRENT_TD" | jq \
+            --arg IMAGE "$IMAGE_URI" \
+            --arg CNAME "$CONTAINER_NAME" '
+            .taskDefinition |
+            .containerDefinitions |= map(
+              if .name == $CNAME then .image = $IMAGE else . end
+            ) |
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes,
+                .placementConstraints, .compatibilities, .registeredAt, .registeredBy)
+          ')
+
+          NEW_REV=$(aws ecs register-task-definition \
+            --cli-input-json "$NEW_TD" --region "$AWS_REGION" | \
+            jq -r '.taskDefinition.revision')
+          echo "Registered $TASK_FAMILY:$NEW_REV"
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_FAMILY:$NEW_REV" \
+            --force-new-deployment \
+            --region "$AWS_REGION" > /dev/null
+          echo "Service updated. Waiting for stability..."
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --region "$AWS_REGION"
+          echo "Deployment complete: $TASK_FAMILY:$NEW_REV"
+
+      - name: Cleanup stale task definition revisions
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+          TASK_FAMILY: ${{ inputs.task-family }}
+        run: |
+          CURRENT=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_FAMILY" --region "$AWS_REGION" | \
+            jq -r '.taskDefinition.revision')
+          PREVIOUS=$(aws ecs list-task-definitions \
+            --family-prefix "$TASK_FAMILY" --region "$AWS_REGION" | \
+            jq -r '.taskDefinitionArns[]' | grep -v ":${CURRENT}$")
+          for rev in $PREVIOUS; do
+            echo "Deregistering $rev"
+            aws ecs deregister-task-definition \
+              --task-definition "$rev" --region "$AWS_REGION" > /dev/null || true
+          done

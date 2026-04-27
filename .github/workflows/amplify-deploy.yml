@@ -1,0 +1,86 @@
+name: Amplify Deploy & Monitor (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app-id:
+        description: AWS Amplify app ID
+        type: string
+        required: true
+      branch:
+        description: Amplify branch to deploy
+        type: string
+        required: true
+      commit-sha:
+        description: Commit SHA to verify in Amplify (defaults to current)
+        type: string
+        required: false
+        default: ''
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+      poll-timeout-minutes:
+        description: Max minutes to wait for Amplify job
+        type: number
+        required: false
+        default: 20
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Amplify Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Start Amplify deployment
+        id: start
+        env:
+          APP_ID: ${{ inputs.app-id }}
+          BRANCH: ${{ inputs.branch }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          JOB_ID=$(aws amplify start-job \
+            --app-id "$APP_ID" \
+            --branch-name "$BRANCH" \
+            --job-type RELEASE \
+            --region "$AWS_REGION" | \
+            jq -r '.jobSummary.jobId')
+          echo "job-id=$JOB_ID" >> "$GITHUB_OUTPUT"
+          echo "Started Amplify job: $JOB_ID"
+
+      - name: Monitor Amplify deployment
+        env:
+          APP_ID: ${{ inputs.app-id }}
+          BRANCH: ${{ inputs.branch }}
+          JOB_ID: ${{ steps.start.outputs.job-id }}
+          AWS_REGION: ${{ inputs.aws-region }}
+          TIMEOUT: ${{ inputs.poll-timeout-minutes }}
+        run: |
+          END=$((SECONDS + TIMEOUT * 60))
+          while [ $SECONDS -lt $END ]; do
+            STATUS=$(aws amplify get-job \
+              --app-id "$APP_ID" \
+              --branch-name "$BRANCH" \
+              --job-id "$JOB_ID" \
+              --region "$AWS_REGION" | \
+              jq -r '.job.summary.status')
+            echo "$(date +%H:%M:%S) Amplify job $JOB_ID: $STATUS"
+            case "$STATUS" in
+              SUCCEED) echo "Deployment succeeded!"; exit 0 ;;
+              FAILED|CANCELLED) echo "::error::Amplify deployment $STATUS"; exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "::error::Amplify deployment timed out after ${TIMEOUT} minutes"
+          exit 1
