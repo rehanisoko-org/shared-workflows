@@ -1,0 +1,50 @@
+# Example: How to use AWS OIDC auth in your repo workflows
+# Copy and adapt this to your repo's .github/workflows/ directory
+
+name: Example Deploy with AWS OIDC
+
+on:
+  push:
+    branches: [staging, main]
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/${{ github.event.repository.name }}:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/${{ github.event.repository.name }}:$IMAGE_TAG
+
+      - name: Deploy to ECS
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Update ECS service with new image
+          # Adjust cluster/service name to match your infra
+          CLUSTER="${{ github.event.repository.name }}-${{ github.ref_name }}"
+          SERVICE="${{ github.event.repository.name }}"
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --force-new-deployment
