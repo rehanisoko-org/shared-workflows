@@ -1,0 +1,23 @@
+name: Enforce Merge Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  check-source-branch:
+    name: Source branch must be staging
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source branch
+        run: |
+          SOURCE="${{ github.head_ref }}"
+          TARGET="${{ github.base_ref }}"
+          if [[ "$TARGET" == "main" && "$SOURCE" != "staging" ]]; then
+            echo "::error::PRs to 'main' must come from the 'staging' branch."
+            echo "  Source: $SOURCE | Required: staging"
+            echo "  Correct flow: feature/* -> staging -> main"
+            exit 1
+          fi
+          echo "✓ $SOURCE -> $TARGET is an allowed merge path."
