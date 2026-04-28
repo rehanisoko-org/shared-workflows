@@ -8,11 +8,16 @@ on:
         type: string
         required: true
       branch:
-        description: Amplify branch to deploy
+        description: Amplify branch name
         type: string
         required: true
       commit-sha:
-        description: Commit SHA to verify in Amplify (defaults to current)
+        description: Commit SHA to wait for in the Amplify auto-build (empty = start a new RELEASE job)
+        type: string
+        required: false
+        default: ''
+      job-type:
+        description: 'RELEASE (manual redeploy) or RETRY (revert to last successful). Leave empty to monitor the auto-triggered build.'
         type: string
         required: false
         default: ''
@@ -22,7 +27,7 @@ on:
         required: false
         default: us-east-2
       poll-timeout-minutes:
-        description: Max minutes to wait for Amplify job
+        description: Max minutes to wait for the Amplify job to complete
         type: number
         required: false
         default: 20
@@ -43,42 +48,92 @@ jobs:
           role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
           aws-region: ${{ inputs.aws-region }}
 
-      - name: Start Amplify deployment
-        id: start
+      - name: Find or start Amplify job
+        id: job
         env:
           APP_ID: ${{ inputs.app-id }}
           BRANCH: ${{ inputs.branch }}
+          COMMIT_SHA: ${{ inputs.commit-sha }}
+          JOB_TYPE: ${{ inputs.job-type }}
           AWS_REGION: ${{ inputs.aws-region }}
+          TIMEOUT: ${{ inputs.poll-timeout-minutes }}
         run: |
-          JOB_ID=$(aws amplify start-job \
-            --app-id "$APP_ID" \
-            --branch-name "$BRANCH" \
-            --job-type RELEASE \
-            --region "$AWS_REGION" | \
-            jq -r '.jobSummary.jobId')
+          set -euo pipefail
+
+          if [[ "$JOB_TYPE" == "RELEASE" ]]; then
+            echo "Starting manual RELEASE job on $BRANCH..."
+            JOB_ID=$(aws amplify start-job \
+              --app-id "$APP_ID" \
+              --branch-name "$BRANCH" \
+              --job-type RELEASE \
+              --job-reason "Manual redeploy from GitHub Actions" \
+              --region "$AWS_REGION" \
+              --query 'jobSummary.jobId' --output text)
+            echo "Started job: $JOB_ID"
+
+          elif [[ "$JOB_TYPE" == "RETRY" ]]; then
+            echo "Finding last successful job to revert to..."
+            LAST_OK=$(aws amplify list-jobs \
+              --app-id "$APP_ID" --branch-name "$BRANCH" \
+              --max-results 10 --region "$AWS_REGION" \
+              --query "jobSummaries[?status=='SUCCEED']|[0].jobId" \
+              --output text)
+            if [[ -z "$LAST_OK" || "$LAST_OK" == "None" ]]; then
+              echo "::error::No successful job found to revert to"
+              exit 1
+            fi
+            echo "Reverting to job $LAST_OK..."
+            JOB_ID=$(aws amplify start-job \
+              --app-id "$APP_ID" --branch-name "$BRANCH" \
+              --job-type RETRY --job-id "$LAST_OK" \
+              --job-reason "Revert to last successful build" \
+              --region "$AWS_REGION" \
+              --query 'jobSummary.jobId' --output text)
+            echo "Started revert job: $JOB_ID"
+
+          else
+            echo "Waiting for Amplify to auto-build commit $COMMIT_SHA on $BRANCH..."
+            END=$((SECONDS + TIMEOUT * 60))
+            JOB_ID=""
+            while [[ $SECONDS -lt $END ]]; do
+              JOB_ID=$(aws amplify list-jobs \
+                --app-id "$APP_ID" --branch-name "$BRANCH" \
+                --region "$AWS_REGION" \
+                --query "jobSummaries[?commitId=='$COMMIT_SHA']|[0].jobId" \
+                --output text 2>/dev/null || true)
+              if [[ -n "$JOB_ID" && "$JOB_ID" != "None" ]]; then
+                echo "Found Amplify job: $JOB_ID"
+                break
+              fi
+              echo "$(date +%H:%M:%S) Waiting for Amplify to pick up commit..."
+              sleep 15
+            done
+          fi
+
+          if [[ -z "$JOB_ID" || "$JOB_ID" == "None" ]]; then
+            echo "::error::Failed to find or start Amplify job"
+            exit 1
+          fi
           echo "job-id=$JOB_ID" >> "$GITHUB_OUTPUT"
-          echo "Started Amplify job: $JOB_ID"
 
       - name: Monitor Amplify deployment
         env:
           APP_ID: ${{ inputs.app-id }}
           BRANCH: ${{ inputs.branch }}
-          JOB_ID: ${{ steps.start.outputs.job-id }}
+          JOB_ID: ${{ steps.job.outputs.job-id }}
           AWS_REGION: ${{ inputs.aws-region }}
           TIMEOUT: ${{ inputs.poll-timeout-minutes }}
         run: |
           END=$((SECONDS + TIMEOUT * 60))
-          while [ $SECONDS -lt $END ]; do
+          while [[ $SECONDS -lt $END ]]; do
             STATUS=$(aws amplify get-job \
-              --app-id "$APP_ID" \
-              --branch-name "$BRANCH" \
-              --job-id "$JOB_ID" \
-              --region "$AWS_REGION" | \
-              jq -r '.job.summary.status')
+              --app-id "$APP_ID" --branch-name "$BRANCH" --job-id "$JOB_ID" \
+              --region "$AWS_REGION" \
+              --query 'job.summary.status' --output text)
             echo "$(date +%H:%M:%S) Amplify job $JOB_ID: $STATUS"
             case "$STATUS" in
-              SUCCEED) echo "Deployment succeeded!"; exit 0 ;;
-              FAILED|CANCELLED) echo "::error::Amplify deployment $STATUS"; exit 1 ;;
+              SUCCEED)            echo "Deployment succeeded!"; exit 0 ;;
+              FAILED|CANCELLED)   echo "::error::Amplify deployment $STATUS"; exit 1 ;;
             esac
             sleep 30
           done
