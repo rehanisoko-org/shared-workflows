@@ -55,8 +55,9 @@ jobs:
           cache: npm
 
       - name: Write .env file
-        if: secrets.env-file-content != ''
-        run: printf '%s\n' "$ENV_CONTENT" > .env
+        run: |
+          [ -z "$ENV_CONTENT" ] && { echo "No env-file-content provided, skipping."; exit 0; }
+          printf '%s\n' "$ENV_CONTENT" > .env
         env:
           ENV_CONTENT: ${{ secrets.env-file-content }}
 
