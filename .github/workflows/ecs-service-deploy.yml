@@ -103,13 +103,37 @@ jobs:
               echo "Service stable."
             fi
           else
-            echo "Skipping stability wait (wait-for-stability=false)."
-            sleep 10
-            RUNNING=$(aws ecs describe-services \
+            echo "Quick health check (60s)..."
+            sleep 60
+
+            ROLLOUT=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+              --region "$AWS_REGION" --output json | \
+              jq -r '.services[0].deployments[] | select(.status=="PRIMARY") | .rolloutState')
+
+            PRIMARY_RUNNING=$(aws ecs describe-services \
               --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
               --region "$AWS_REGION" \
               --query 'services[0].deployments[?status==`PRIMARY`].runningCount | [0]' --output text)
-            echo "Primary deployment running count: $RUNNING"
+
+            echo "Primary deployment: rollout=$ROLLOUT running=$PRIMARY_RUNNING"
+
+            if [ "$ROLLOUT" = "FAILED" ]; then
+              echo "::error::Deployment FAILED — new task crashed. ECS circuit breaker will auto-rollback."
+              exit 1
+            fi
+
+            STOPPED=$(aws ecs list-tasks \
+              --cluster "$ECS_CLUSTER" --service-name "$ECS_SERVICE" \
+              --desired-status STOPPED --region "$AWS_REGION" \
+              --query 'taskArns' --output json | jq 'length')
+
+            if [ "$STOPPED" -gt 2 ] && [ "$PRIMARY_RUNNING" = "0" ]; then
+              echo "::error::New task keeps crashing ($STOPPED stopped tasks, 0 running). Check container logs."
+              exit 1
+            fi
+
+            echo "Health check passed."
           fi
 
       - name: Cleanup stale task definition revisions
