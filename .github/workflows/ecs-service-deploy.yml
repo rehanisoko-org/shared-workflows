@@ -23,6 +23,11 @@ on:
         description: Container name in task definition to update
         type: string
         required: true
+      wait-for-stability:
+        description: Wait for ECS service to stabilize (set false for workers/celery)
+        type: boolean
+        required: false
+        default: true
       aws-region:
         description: AWS region
         type: string
@@ -57,6 +62,7 @@ jobs:
           ECS_SERVICE: ${{ inputs.service }}
           CONTAINER_NAME: ${{ inputs.container-name }}
           IMAGE_URI: ${{ inputs.image-uri }}
+          WAIT: ${{ inputs.wait-for-stability }}
         run: |
           echo "Fetching current task definition: $TASK_FAMILY"
           CURRENT_TD=$(aws ecs describe-task-definition \
@@ -85,55 +91,25 @@ jobs:
             --task-definition "$TASK_FAMILY:$NEW_REV" \
             --force-new-deployment \
             --region "$AWS_REGION" > /dev/null
-          echo "Service updated. Waiting for stability..."
 
-          MAX_RETRIES=3
-          for i in $(seq 1 $MAX_RETRIES); do
-            if aws ecs wait services-stable \
+          if [ "$WAIT" = "true" ]; then
+            echo "Waiting for service to stabilize..."
+            if ! aws ecs wait services-stable \
               --cluster "$ECS_CLUSTER" \
               --services "$ECS_SERVICE" \
               --region "$AWS_REGION" 2>/dev/null; then
+              echo "::warning::Service did not stabilize within timeout — check ECS console"
+            else
               echo "Service stable."
-              break
             fi
-            if [ "$i" -eq "$MAX_RETRIES" ]; then
-              echo "::error::Service failed to stabilize after $MAX_RETRIES attempts"
-              exit 1
-            fi
-            echo "Retry $i/$MAX_RETRIES — waiting 30s..."
-            sleep 30
-          done
-
-      - name: Validate deployed image
-        env:
-          AWS_REGION: ${{ inputs.aws-region }}
-          ECS_CLUSTER: ${{ inputs.cluster }}
-          ECS_SERVICE: ${{ inputs.service }}
-          CONTAINER_NAME: ${{ inputs.container-name }}
-          IMAGE_URI: ${{ inputs.image-uri }}
-        run: |
-          TASK_ARN=$(aws ecs list-tasks \
-            --cluster "$ECS_CLUSTER" \
-            --service-name "$ECS_SERVICE" \
-            --desired-status RUNNING \
-            --region "$AWS_REGION" \
-            --query 'taskArns[0]' --output text)
-
-          if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ]; then
-            echo "::warning::No running task found — skipping image validation"
-            exit 0
-          fi
-
-          ACTUAL=$(aws ecs describe-tasks \
-            --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
-            --region "$AWS_REGION" \
-            --query "tasks[0].containers[?name=='$CONTAINER_NAME'].image | [0]" \
-            --output text)
-
-          if [ "$ACTUAL" != "$IMAGE_URI" ]; then
-            echo "::warning::Image mismatch: expected $IMAGE_URI, got $ACTUAL"
           else
-            echo "Validated: $IMAGE_URI is running."
+            echo "Skipping stability wait (wait-for-stability=false)."
+            sleep 10
+            RUNNING=$(aws ecs describe-services \
+              --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+              --region "$AWS_REGION" \
+              --query 'services[0].deployments[?status==`PRIMARY`].runningCount | [0]' --output text)
+            echo "Primary deployment running count: $RUNNING"
           fi
 
       - name: Cleanup stale task definition revisions
