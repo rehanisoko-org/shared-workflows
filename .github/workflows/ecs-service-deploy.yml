@@ -154,7 +154,7 @@ jobs:
           done
 
       - name: Notify Slack
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           SERVICE: ${{ inputs.service }}
@@ -162,6 +162,7 @@ jobs:
           IMAGE: ${{ inputs.image-uri }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "$SLACK_WEBHOOK" ] && { echo "No Slack webhook configured, skipping."; exit 0; }
           if [ "$STATUS" = "success" ]; then
             EMOJI=":white_check_mark:"
             TEXT="$EMOJI *$SERVICE* deployed successfully"
@@ -169,6 +170,6 @@ jobs:
             EMOJI=":x:"
             TEXT="$EMOJI *$SERVICE* deploy *FAILED*"
           fi
-          curl -s -X POST "$SLACK_WEBHOOK" \
+          curl -sf -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
             -d "{\"text\":\"$TEXT\n> Image: \`$IMAGE\`\n> <$RUN_URL|View run>\"}" || true

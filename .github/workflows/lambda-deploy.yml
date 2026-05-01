@@ -92,13 +92,14 @@ jobs:
           done
 
       - name: Notify Slack
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           STATUS: ${{ job.status }}
           FUNCTIONS: ${{ inputs.function-names }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [ -z "$SLACK_WEBHOOK" ] && { echo "No Slack webhook configured, skipping."; exit 0; }
           if [ "$STATUS" = "success" ]; then
             TEXT=":white_check_mark: Lambda *$FUNCTIONS* updated successfully"
           else

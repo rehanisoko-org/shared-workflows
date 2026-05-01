@@ -79,12 +79,13 @@ jobs:
         run: echo "Instance already running for ${{ inputs.instance-tag }} — skipping launch."
 
       - name: Notify Slack
-        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        if: always()
         env:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
           SCRAPER: ${{ inputs.scraper-name }}
           STATUS: ${{ job.status }}
         run: |
-          curl -s -X POST "$SLACK_WEBHOOK" \
+          [ -z "$SLACK_WEBHOOK" ] && { echo "No Slack webhook configured, skipping."; exit 0; }
+          curl -sf -X POST "$SLACK_WEBHOOK" \
             -H "Content-Type: application/json" \
-            -d "{\"text\":\"Scraper *$SCRAPER* job: $STATUS\"}"
+            -d "{\"text\":\"Scraper *$SCRAPER* job: $STATUS\"}" || true
