@@ -1,0 +1,50 @@
+name: Slack Notification
+description: Post a deployment status message to Slack
+
+inputs:
+  webhook-url:
+    description: Slack webhook URL
+    required: true
+  status:
+    description: "Job status (success, failure, cancelled)"
+    required: true
+  service-name:
+    description: Name of the service being deployed
+    required: true
+  environment:
+    description: Target environment (staging, production)
+    required: false
+    default: ''
+  message:
+    description: Optional custom message (overrides auto-generated)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Send Slack notification
+      shell: bash
+      env:
+        SLACK_WEBHOOK: ${{ inputs.webhook-url }}
+        STATUS: ${{ inputs.status }}
+        SERVICE: ${{ inputs.service-name }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        CUSTOM_MSG: ${{ inputs.message }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        REPO: ${{ github.repository }}
+        REF: ${{ github.ref_name }}
+      run: |
+        if [ -n "$CUSTOM_MSG" ]; then
+          TEXT="$CUSTOM_MSG"
+        elif [ "$STATUS" = "success" ]; then
+          TEXT=":white_check_mark: *${SERVICE}* deployed to *${ENVIRONMENT:-$REF}*"
+        elif [ "$STATUS" = "failure" ]; then
+          TEXT=":x: *${SERVICE}* deploy to *${ENVIRONMENT:-$REF}* *FAILED*"
+        else
+          TEXT=":warning: *${SERVICE}* deploy to *${ENVIRONMENT:-$REF}*: $STATUS"
+        fi
+        PAYLOAD="{\"text\":\"${TEXT}\n> Repo: \`${REPO}\` | Branch: \`${REF}\`\n> <${RUN_URL}|View run>\"}"
+        curl -sf -X POST "$SLACK_WEBHOOK" \
+          -H "Content-Type: application/json" \
+          -d "$PAYLOAD" || echo "::warning::Slack notification failed"

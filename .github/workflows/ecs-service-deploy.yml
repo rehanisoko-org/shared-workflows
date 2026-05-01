@@ -28,6 +28,9 @@ on:
         type: string
         required: false
         default: us-east-2
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
 
 permissions:
   id-token: write
@@ -46,6 +49,7 @@ jobs:
           aws-region: ${{ inputs.aws-region }}
 
       - name: Update task definition and deploy
+        id: deploy
         env:
           AWS_REGION: ${{ inputs.aws-region }}
           TASK_FAMILY: ${{ inputs.task-family }}
@@ -73,6 +77,7 @@ jobs:
             --cli-input-json "$NEW_TD" --region "$AWS_REGION" | \
             jq -r '.taskDefinition.revision')
           echo "Registered $TASK_FAMILY:$NEW_REV"
+          echo "revision=$NEW_REV" >> "$GITHUB_OUTPUT"
 
           aws ecs update-service \
             --cluster "$ECS_CLUSTER" \
@@ -82,11 +87,54 @@ jobs:
             --region "$AWS_REGION" > /dev/null
           echo "Service updated. Waiting for stability..."
 
-          aws ecs wait services-stable \
+          MAX_RETRIES=3
+          for i in $(seq 1 $MAX_RETRIES); do
+            if aws ecs wait services-stable \
+              --cluster "$ECS_CLUSTER" \
+              --services "$ECS_SERVICE" \
+              --region "$AWS_REGION" 2>/dev/null; then
+              echo "Service stable."
+              break
+            fi
+            if [ "$i" -eq "$MAX_RETRIES" ]; then
+              echo "::error::Service failed to stabilize after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            echo "Retry $i/$MAX_RETRIES — waiting 30s..."
+            sleep 30
+          done
+
+      - name: Validate deployed image
+        env:
+          AWS_REGION: ${{ inputs.aws-region }}
+          ECS_CLUSTER: ${{ inputs.cluster }}
+          ECS_SERVICE: ${{ inputs.service }}
+          CONTAINER_NAME: ${{ inputs.container-name }}
+          IMAGE_URI: ${{ inputs.image-uri }}
+        run: |
+          TASK_ARN=$(aws ecs list-tasks \
             --cluster "$ECS_CLUSTER" \
-            --services "$ECS_SERVICE" \
-            --region "$AWS_REGION"
-          echo "Deployment complete: $TASK_FAMILY:$NEW_REV"
+            --service-name "$ECS_SERVICE" \
+            --desired-status RUNNING \
+            --region "$AWS_REGION" \
+            --query 'taskArns[0]' --output text)
+
+          if [ -z "$TASK_ARN" ] || [ "$TASK_ARN" = "None" ]; then
+            echo "::warning::No running task found — skipping image validation"
+            exit 0
+          fi
+
+          ACTUAL=$(aws ecs describe-tasks \
+            --cluster "$ECS_CLUSTER" --tasks "$TASK_ARN" \
+            --region "$AWS_REGION" \
+            --query "tasks[0].containers[?name=='$CONTAINER_NAME'].image | [0]" \
+            --output text)
+
+          if [ "$ACTUAL" != "$IMAGE_URI" ]; then
+            echo "::warning::Image mismatch: expected $IMAGE_URI, got $ACTUAL"
+          else
+            echo "Validated: $IMAGE_URI is running."
+          fi
 
       - name: Cleanup stale task definition revisions
         env:
@@ -104,3 +152,23 @@ jobs:
             aws ecs deregister-task-definition \
               --task-definition "$rev" --region "$AWS_REGION" > /dev/null || true
           done
+
+      - name: Notify Slack
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SERVICE: ${{ inputs.service }}
+          STATUS: ${{ job.status }}
+          IMAGE: ${{ inputs.image-uri }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = "success" ]; then
+            EMOJI=":white_check_mark:"
+            TEXT="$EMOJI *$SERVICE* deployed successfully"
+          else
+            EMOJI=":x:"
+            TEXT="$EMOJI *$SERVICE* deploy *FAILED*"
+          fi
+          curl -s -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"$TEXT\n> Image: \`$IMAGE\`\n> <$RUN_URL|View run>\"}" || true

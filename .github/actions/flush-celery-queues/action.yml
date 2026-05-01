@@ -1,0 +1,36 @@
+name: Flush Celery Queues
+description: Flush all Celery queues from Redis
+
+inputs:
+  redis-url:
+    description: "Redis URL (redis://host:port)"
+    required: true
+  queues:
+    description: Space-separated list of queue names to flush
+    required: false
+    default: "default ml_training ml_prediction ml_cleaning studio reports kyb_emails celery stl_orchestrate stl_compute stl_compute_live stl_background assess"
+
+runs:
+  using: composite
+  steps:
+    - name: Flush Celery queues
+      shell: bash
+      run: |
+        apt-get update -qq && apt-get install -y -qq redis-tools > /dev/null 2>&1 || \
+          apk add --no-cache redis > /dev/null 2>&1 || true
+
+        REDIS_HOST=$(echo "$REDIS_URL" | sed -e 's|redis://||' -e 's|:.*||')
+        REDIS_PORT=$(echo "$REDIS_URL" | sed -e 's|redis://||' -e 's|.*:||' -e 's|/.*||')
+
+        echo "Flushing queues on $REDIS_HOST:$REDIS_PORT"
+        for q in $QUEUES; do
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" DEL "$q" || true
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" DEL "celery-task-meta-$q" || true
+          redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" DEL "_kombu.binding.$q" || true
+        done
+        redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" KEYS "unacked*" | \
+          xargs -r redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" DEL || true
+        echo "All queues flushed."
+      env:
+        REDIS_URL: ${{ inputs.redis-url }}
+        QUEUES: ${{ inputs.queues }}

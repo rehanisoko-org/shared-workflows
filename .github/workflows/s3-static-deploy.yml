@@ -1,0 +1,84 @@
+name: S3 Static Site Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      s3-bucket:
+        description: S3 bucket name to sync to
+        type: string
+        required: true
+      build-command:
+        description: Build command (e.g. npm run build)
+        type: string
+        required: false
+        default: npm run build
+      dist-dir:
+        description: Directory containing build output
+        type: string
+        required: false
+        default: dist
+      node-version:
+        description: Node.js version
+        type: string
+        required: false
+        default: '20'
+      aws-region:
+        description: AWS region
+        type: string
+        required: false
+        default: us-east-2
+      cache-control:
+        description: Cache-Control header for uploaded files
+        type: string
+        required: false
+        default: "no-cache, no-store, must-revalidate"
+    secrets:
+      env-file-content:
+        description: Contents to write to .env before building
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: Build & Deploy to S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Write .env file
+        if: secrets.env-file-content != ''
+        run: printf '%s\n' "$ENV_CONTENT" > .env
+        env:
+          ENV_CONTENT: ${{ secrets.env-file-content }}
+
+      - run: npm ci
+
+      - run: ${{ inputs.build-command }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Sync to S3
+        run: |
+          aws s3 sync "$DIST_DIR/" "s3://$S3_BUCKET/" \
+            --delete \
+            --cache-control "$CACHE_CONTROL"
+          aws s3 cp "$DIST_DIR/index.html" "s3://$S3_BUCKET/index.html" \
+            --cache-control "no-cache, no-store, must-revalidate"
+          echo "Deployed to s3://$S3_BUCKET/"
+        env:
+          S3_BUCKET: ${{ inputs.s3-bucket }}
+          DIST_DIR: ${{ inputs.dist-dir }}
+          CACHE_CONTROL: ${{ inputs.cache-control }}

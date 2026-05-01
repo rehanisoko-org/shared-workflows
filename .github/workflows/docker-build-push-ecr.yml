@@ -42,6 +42,10 @@ on:
         type: boolean
         required: false
         default: true
+    secrets:
+      env-file-content:
+        description: Contents to write to .env before building (optional)
+        required: false
     outputs:
       image-uri:
         description: Full image URI pushed to ECR
@@ -88,6 +92,12 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
         with:
           registries: ${{ inputs.aws-account-id }}
+
+      - name: Write .env file
+        if: secrets.env-file-content != ''
+        run: printf '%s\n' "$ENV_CONTENT" > .env
+        env:
+          ENV_CONTENT: ${{ secrets.env-file-content }}
 
       - name: Pull latest for cache
         if: inputs.cache-from-latest

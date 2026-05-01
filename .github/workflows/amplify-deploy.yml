@@ -32,6 +32,10 @@ on:
         required: false
         default: 20
 
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+
 permissions:
   id-token: write
   contents: read
@@ -144,3 +148,21 @@ jobs:
           done
           echo "::error::Amplify deployment timed out after ${TIMEOUT} minutes"
           exit 1
+
+      - name: Notify Slack
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          BRANCH: ${{ inputs.branch }}
+          APP_ID: ${{ inputs.app-id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = "success" ]; then
+            TEXT=":white_check_mark: Amplify *$BRANCH* deployed successfully (app: $APP_ID)"
+          else
+            TEXT=":x: Amplify *$BRANCH* deploy *FAILED* (app: $APP_ID)"
+          fi
+          curl -sf -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"$TEXT\n> <$RUN_URL|View run>\"}" || true

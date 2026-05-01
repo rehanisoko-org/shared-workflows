@@ -6,7 +6,7 @@ on:
       aws-region:
         description: AWS region to authenticate against
         type: string
-        default: us-west-2
+        default: us-east-2
       role-to-assume:
         description: IAM role ARN to assume (defaults to org OIDC role)
         type: string

@@ -22,6 +22,10 @@ on:
         required: false
         default: us-east-2
 
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+
 permissions:
   id-token: write
   contents: read
@@ -86,3 +90,20 @@ jobs:
               --function-name "$fn" \
               --region "$AWS_REGION"
           done
+
+      - name: Notify Slack
+        if: always() && secrets.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+          STATUS: ${{ job.status }}
+          FUNCTIONS: ${{ inputs.function-names }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATUS" = "success" ]; then
+            TEXT=":white_check_mark: Lambda *$FUNCTIONS* updated successfully"
+          else
+            TEXT=":x: Lambda *$FUNCTIONS* deploy *FAILED*"
+          fi
+          curl -sf -X POST "$SLACK_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"$TEXT\n> <$RUN_URL|View run>\"}" || true
