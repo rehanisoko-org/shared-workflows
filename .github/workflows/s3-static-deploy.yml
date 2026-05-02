@@ -61,7 +61,8 @@ jobs:
         env:
           ENV_CONTENT: ${{ secrets.env-file-content }}
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci || npm install
 
       - run: ${{ inputs.build-command }}
 
