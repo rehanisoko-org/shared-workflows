@@ -12,7 +12,12 @@ on:
         type: string
         required: true
       env-file-path:
-        description: Path to .env file for syncing environment variables (optional)
+        description: Path to .env file in repo for syncing environment variables (optional)
+        type: string
+        required: false
+        default: ''
+      cfn-stack-name:
+        description: CloudFormation stack name to look up SQS_BULK_QUEUE_URL (optional)
         type: string
         required: false
         default: ''
@@ -24,6 +29,9 @@ on:
 
     secrets:
       SLACK_WEBHOOK_URL:
+        required: false
+      env-file-content:
+        description: Raw .env content to write and sync to Lambda config (optional)
         required: false
 
 permissions:
@@ -65,30 +73,74 @@ jobs:
             echo "$fn updated."
           done
 
-      - name: Sync environment variables from .env file
-        if: inputs.env-file-path != ''
+      - name: Write .env from secret
+        run: |
+          [ -z "$ENV_CONTENT" ] && { echo "No env-file-content provided, skipping."; exit 0; }
+          printf '%s\n' "$ENV_CONTENT" > .env
+          echo "env-file=.env" >> "$GITHUB_ENV"
         env:
-          ENV_FILE: ${{ inputs.env-file-path }}
+          ENV_CONTENT: ${{ secrets.env-file-content }}
+
+      - name: Resolve env file path
+        id: env
+        run: |
+          if [ -n "${{ env.env-file }}" ]; then
+            echo "path=.env" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.env-file-path }}" ]; then
+            echo "path=${{ inputs.env-file-path }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync environment variables to Lambda
+        if: steps.env.outputs.path != ''
+        env:
+          ENV_FILE: ${{ steps.env.outputs.path }}
           FUNCTION_NAMES: ${{ inputs.function-names }}
           AWS_REGION: ${{ inputs.aws-region }}
+          CFN_STACK: ${{ inputs.cfn-stack-name }}
         run: |
           if [ ! -f "$ENV_FILE" ]; then
             echo "::warning::env file not found: $ENV_FILE — skipping env sync"
             exit 0
           fi
-          ENV_VARS=$(grep -v '^#' "$ENV_FILE" | grep '=' | \
-            jq -Rn '[inputs | split("=") | {(.[0]): (.[1:]|join("="))}] | add // {}')
+          ENV_JSON="{"
+          FIRST=true
+          while IFS='=' read -r key value || [ -n "$key" ]; do
+            case "$key" in \#*|"") continue ;; esac
+            key=$(echo "$key" | xargs)
+            [ -z "$key" ] && continue
+            value=$(echo "$value" | sed 's/^["'"'"']//;s/["'"'"']$//')
+            if [ "$FIRST" = "true" ]; then FIRST=false; else ENV_JSON="$ENV_JSON,"; fi
+            escaped_value=$(printf '%s' "$value" | sed 's/\\/\\\\/g; s/"/\\"/g')
+            ENV_JSON="$ENV_JSON\"$key\":\"$escaped_value\""
+          done < "$ENV_FILE"
+
+          if [ -n "$CFN_STACK" ]; then
+            SQS_URL=$(aws cloudformation describe-stacks \
+              --stack-name "$CFN_STACK" --region "$AWS_REGION" \
+              --query 'Stacks[0].Outputs[?OutputKey==`BulkQueueUrl`].OutputValue' \
+              --output text 2>/dev/null || echo "")
+            if [ -n "$SQS_URL" ] && [ "$SQS_URL" != "None" ]; then
+              [ "$FIRST" = "false" ] && ENV_JSON="$ENV_JSON,"
+              ENV_JSON="$ENV_JSON\"SQS_BULK_QUEUE_URL\":\"$SQS_URL\""
+            fi
+          fi
+          ENV_JSON="$ENV_JSON}"
+
+          echo "Syncing environment variables..."
           IFS=',' read -ra FUNCTIONS <<< "$FUNCTION_NAMES"
           for fn in "${FUNCTIONS[@]}"; do
             fn=$(echo "$fn" | xargs)
-            echo "Syncing env vars to $fn"
+            echo "Updating $fn env config..."
             aws lambda update-function-configuration \
               --function-name "$fn" \
-              --environment "{\"Variables\": $ENV_VARS}" \
+              --environment "{\"Variables\": $ENV_JSON}" \
               --region "$AWS_REGION" > /dev/null
             aws lambda wait function-updated \
               --function-name "$fn" \
               --region "$AWS_REGION"
+            echo "$fn env updated."
           done
 
       - name: Notify Slack
