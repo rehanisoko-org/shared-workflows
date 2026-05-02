@@ -52,7 +52,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
+
+      - name: Cache node_modules
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json', 'package.json') }}
+          restore-keys: ${{ runner.os }}-node-
 
       - name: Write .env file
         run: |
@@ -62,6 +69,7 @@ jobs:
           ENV_CONTENT: ${{ secrets.env-file-content }}
 
       - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
         run: npm ci || npm install
 
       - run: ${{ inputs.build-command }}
